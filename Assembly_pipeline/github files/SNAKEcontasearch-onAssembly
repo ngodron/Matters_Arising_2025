@@ -1,0 +1,164 @@
+#!/usr/bin/env python
+# Title : Search for contamination in assembled contigs from SRAs
+# Authors : S. Leclercq
+# Date : 2025-02-21
+
+# execute on the MIGALE server with: ./qsubSnake.py -s SNAKEcontasearch -j 20
+#
+# or without separation of the jobs in the queue (not recommanded but may be necessary for the download step):
+# conda activate snakemake-7.5.0 && snakemake --snakefile SNAKEcontasearch --jobs 15 && conda deactivate
+# 
+
+shell.executable("/bin/bash")
+shell.prefix("source /usr/local/genome/Anaconda3/etc/profile.d/conda.sh;")
+from glob import glob
+
+# SRAs to process
+f = open("SRAlist.txt","r")
+SAMPLES = f.read().splitlines()
+f.close
+
+TYPES=['MGES','ARGS']
+
+# Ouput files to generate
+##############################
+rule all:
+    input: 
+        expand("00.MGES/{sample}.MGES.fasta", sample=SAMPLES),
+        expand("00.ARGS/{sample}.ARGS.fasta", sample=SAMPLES),
+        expand("02.ASSEMBLIES/{sample}/{sample}.kk_slow.out", sample=SAMPLES),
+        expand("02.ASSEMBLIES/{sample}/{sample}.{TYPE}.coverages", sample=SAMPLES, TYPE=TYPES),
+        expand("03.COVERAGEPLOTS/{sample}_coverage.png", sample=SAMPLES)
+
+
+
+# Extract MGEs and ARGs for each SRA specifically
+##################################################
+rule extractMGE:
+    input:
+        "SRAARGMapping.tab"
+
+    output:
+        O1="00.MGES/{sample}.MGES.fasta",
+        O2="00.ARGS/{sample}.ARGS.fasta"
+
+    params:
+        "{sample}"
+
+    threads: 1
+
+    shell: 
+        "cat {input} | grep {params} | cut -f 1,2,3 | sort -u | awk '{{print \">\"$2\".\"$1\"\\n\"$3}}' > {output.O1}"
+        " && cat  {input} | grep {params} | cut -f 11,12,13 | sort -u | awk '{{print \">\"$2\".\"$1\"\\n\"$3}}' > {output.O2}"
+
+
+# Download SRAs
+##################################################
+rule getSRA:
+    output:
+        "{sample}/{sample}.sra"
+
+    params:
+        "{sample}"
+
+    shell: 
+        "conda activate sra-tools-2.11.0 && prefetch -O . -f yes {params} && conda deactivate"
+
+
+# convert the SRA in fastq, compress and delete original SRA
+############################################################
+checkpoint getfastqgz:
+    input:
+        "{sample}/{sample}.sra"
+        
+    output:
+         directory("00.READS/{sample}")
+
+    params:
+        "{sample}"
+
+    threads: 2
+
+    shell: 
+        "conda activate sra-tools-2.11.0 && fasterq-dump ./{params} -t {params} -e {threads} && conda deactivate"
+        " && gzip {params}*.fastq && mkdir -p {output} && mv {params}*.fastq.gz {output}/"
+        " && rm -Rf {params}"
+
+# Function to test if we have single or paired fastq
+####################################################
+def paired_or_not(wildcards):
+    checkp = checkpoints.getfastqgz.get(**wildcards).output[0]
+    FQfiles = glob(f"{checkp}/*.gz")
+    return FQfiles
+
+
+# Run Spades on the downloaded SRA
+##################################################
+rule spades:
+    input:
+        paired_or_not
+
+    output:
+        "02.ASSEMBLIES/{sample}/scaffolds.fasta"
+
+    params:
+        S="02.ASSEMBLIES/{sample}",
+        P=lambda wildcards, input: "-1 "+input[0]+" -2 "+input[1] if len(input) > 2 else ("-1 "+" -2 ".join(input) if len(input) > 1 else " -s "+input[0])
+            
+    threads: 15
+
+    shell: 
+        "conda activate spades-3.15.3 && spades.py --isolate -o {params.S} {params.P} -t {threads} -m 30 && conda deactivate"
+        " && rm -Rf {params.S}/assembly_graph* {params.S}/K* {params.S}/contigs* {params.S}/before_rr.fasta {params.S}/tmp {params.S}/pipeline_state {params.S}/misc"
+        
+# Run Kraken2 on the assembled SRA
+##################################################
+rule krakenAS:
+    input:
+        "02.ASSEMBLIES/{sample}/scaffolds.fasta"
+
+    output:
+        "02.ASSEMBLIES/{sample}/{sample}.kk_slow.out"
+
+    threads: 10
+
+    shell: 
+        "conda activate kraken2-2.1.2 && kraken2 --db /db/outils/kraken2/bacteria --use-names --threads {threads} {input} | sed \"s/\\t/_/g\" > {output} && conda deactivate"
+
+
+# Run the detection of ARGS and MGES in the assembled SRA
+#########################################################
+rule BlastAS:
+    input:
+        S="02.ASSEMBLIES/{sample}/scaffolds.fasta",
+        D="00.{TYPE}/{sample}.{TYPE}.fasta"
+
+    output:
+        "02.ASSEMBLIES/{sample}/{sample}.{TYPE}.coverages"
+
+    threads: 5
+
+    shell: 
+        "conda activate blast-2.12.0 && blastn -query {input.D} -subject {input.S} -evalue 10 -perc_identity 90 -outfmt 6 -num_threads {threads} | cut -f 2 | cut -d \"_\" -f 4,6 | sort -u > {output} && conda deactivate"
+
+
+# Plot the ARG- and MGE-containng contigs on Taxon-affiliated contigs
+#####################################################################
+rule Makeplot:
+    input:
+        K="02.ASSEMBLIES/{sample}/{sample}.kk_slow.out",
+        A="02.ASSEMBLIES/{sample}/{sample}.ARGS.coverages",
+        M="02.ASSEMBLIES/{sample}/{sample}.MGES.coverages"
+
+    output:
+        "03.COVERAGEPLOTS/{sample}_coverage.png"
+    priority: 50
+
+    params:
+        "{sample}"
+
+    threads: 1
+
+    shell: 
+        "Rscript plot_assembled_contigs.R {params} {input.A} {input.M} {input.K} {output}"
+

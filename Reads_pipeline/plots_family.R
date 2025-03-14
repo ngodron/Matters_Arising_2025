@@ -4,7 +4,7 @@
 
 # Libraries ----
 library(tidyverse)
-library(taxize)
+library(taxizedb)
 library(ggbeeswarm)
 library(ComplexUpset)
 
@@ -13,13 +13,13 @@ library(ComplexUpset)
 cont_threshold <- 5
 
 # Inputs ----
-main_dir <- "/home/nicolas/Work/CatiBioMed/NiGo_PhD/MArising/"
+main_dir <- "/home/nicolas/IAME/Ellabaan_Response/"
 
 ## metadata ----
-metadata <-
-  read_tsv(paste0(main_dir, "output/metadata/All_run_info.tsv"))
+metadata_df <-
+  read_tsv(paste0(main_dir, "All_run_info.tsv"))
 
-too_many_columns <- problems(metadata)
+too_many_columns <- problems(metadata_df)
 # Upon examination, 6 more columns are found in 65 metadata rows
 # The columns are not of interest to this work and are thus discarded.
 # They are: library_prep_location,	rna_prep_3_protocol, ph,
@@ -29,13 +29,13 @@ rm(too_many_columns)
 ## metaphlan ----
 contamination_df <-
   read_tsv(paste0(main_dir,
-                  "run_2/abundance_table.tsv"),
+                  "20250203_All_metaphlan_profiles.tsv"),
            comment = "#")
 
 # Filtering, parsing & querying taxonomy ----
 ## metadata, GNR ----
 metadata_df <-
-  metadata |>
+  metadata_df |>
   select(c("run_accession", "sample_alias", "scientific_name",
            "tax_id", "tax_lineage",
            "sample_accession", "submission_accession", 
@@ -44,52 +44,62 @@ metadata_df <-
            "read_count", "base_count", "library_strategy", "library_layout",
            "tag", "first_created"))
 
-# Two samples are in the table twice due to aliases (cf. metadata_df)
+# Renaming columns to allow for comparison with metadata
+names(contamination_df) <- str_replace(names(contamination_df),
+                                       pattern = "^X",
+                                       replacement = "")
+
+names(contamination_df) <- str_replace(names(contamination_df),
+                                       pattern = "_metaphlan$",
+                                       replacement = "")
+
+# Three samples are in the table twice due to aliases (cf. metadata_df)
 duplicates <- data.frame(contamination_df$clade_name,
                          contamination_df$ERR594079, contamination_df$"0788",
-                         contamination_df$ERR2204715, contamination_df$"7518")
+                         contamination_df$ERR2204715, contamination_df$"7518",
+                         contamination_df$ERR1512641, contamination_df$"394-2_staphylococcus-aureus")
 ( duplicates <- duplicates[rowSums(duplicates[2:5] != 0) > 0, ] )
-# Filtering out these three sequences
+
+# Filtering out the three duplicate samples
 contamination_df <- contamination_df |>
-  select(! c("0788", "7518")) |>
+  select(! c("0788", "7518", "394-2_staphylococcus-aureus")) |>
   # Renaming a strain with a super long name with its ERR ID instead
-  rename(ERR1549309 = `Isolat27_IonXpress_012_R_2012_11_16_09_40_45_user_SN1-88_Auto_user_SN1-88_89`)
+  rename(ERR1549309 = `Isolat27_IonXpress_012_R_2012_11_16_09_40_45_user_SN1-88_Auto_user_SN1-88_89`) |>
+  identity()
 
 
-# Global Names Resolver (GNR) service from the "Encyclopedia of Life"
-resolved_names <- taxize::gnr_resolve(sci = metadata_df$scientific_name,
-                                      # data source n°12 is the "Encyclopedia of Life"
-                                      data_source_ids = 12,
-                                      resolve_once = TRUE,
-                                      best_match = TRUE)
+# NCBI taxonomy DB download and querying
+## Taxonomy retrieval ----
+taxizedb::db_download_ncbi()
 
-names(resolved_names)[c(1,3)] <- c("scientific_name", "resolved_name")
+# Checking NCBI taxonomic IDs
+taxize_NCBI_ID <-
+  as.numeric(taxizedb::name2taxid(metadata_df$scientific_name))
+table(taxize_NCBI_ID == metadata_df$tax_id)
 
-metadata_df <-
-  left_join(metadata_df,
-            resolved_names[c("scientific_name", "resolved_name")],
-            by = "scientific_name") |>
-  rowwise() |>
-  mutate(genus_species = word(resolved_name,
-                              start = 1,
-                              end = 2,
-                              sep = " ")) |>
-  mutate(sra_genus = word(resolved_name,
-                          start = 1,
-                          end = 1,
-                          sep = " "))
+fam_phyl <-
+  function(x) {
+    taxonomy <-
+      taxizedb::classification(x)[[1]]
+    taxonomy[taxonomy$rank %in% c("genus", "family", "phylum"), "name"]
+  }
+
+fam_phyl_columns <-
+  data.frame(t(sapply(
+  metadata_df$tax_id,
+  fam_phyl)))
+
+metadata_df$phylum <- fam_phyl_columns[, 1]
+metadata_df$family <- fam_phyl_columns[, 2]
+metadata_df$genus <- fam_phyl_columns[, 3]
 
 # Special case for resolved name of length 1 word (i.e. only Genus)
-metadata_df$genus_species[is.na(metadata_df$genus_species)] <-
-  metadata_df$resolved_name[is.na(metadata_df$genus_species)]
+# metadata_df$species[is.na(metadata_df$species)] <-
+#   metadata_df$resolved_name[is.na(metadata_df$species)]
 
 ### Fetching family ----
 # The step below can take a minute
-unique_metadata_family <- tax_name(unique(metadata_df$genus_species),
-                                   get = c("family","phylum"))
-metadata_df <- left_join(x = metadata_df,
-                         y = unique_metadata_family[2:4],
-                         by = join_by(genus_species == query) )
+unique_metadata_family <- unique(metadata_df$family)
 
 ## metaphlan ----
 ### Family ----
@@ -167,7 +177,7 @@ threshold_family <- threshold_family |>
   mutate(SRA_Agreement = case_when(between(sra_abundance, 95, 100) ~ "95-100%",
                                    between(sra_abundance, 80, 95) ~ "80-95%",
                                    between(sra_abundance, 5, 80) ~ "5-80%",
-                                   between(sra_abundance, 0, 5) ~ "Taxonomic mismatch",
+                                   between(sra_abundance, 0, 5) ~ "Mismatch",
   ))
 
 family_and_phylum <- contamination_family[contamination_family$clade_name %in% colnames(threshold_family),
@@ -182,56 +192,115 @@ family_and_phylum <-
 # Plots ----
 ## metaphlan-SRA congruency ----
 violin_df <- metaphlan_sra_ref[! metaphlan_sra_ref$Name %in% c("clade_name", "phylum"),]
+violin_df$SRA_of_interest <-
+  violin_df$Name %in% c("SRR1522630",
+                        "ERR212931")
 violin_df <- violin_df[order(violin_df$family), ]
+
 violin_plot <- ggplot(data = violin_df) +
   aes(x = "",
       y = sra_abundance) +
-  # geom_violin(adjust = 1e-1,
-  #             alpha = 0.2,
-  #             fill = "#aaaaaa") +
   ggbeeswarm::geom_beeswarm(aes(x = family,
                                 y = sra_abundance,
-                                colour = family),
-                            method = "center",
-                            cex = 2,
-                            side = 0L,
-                            dodge.width = 1) +
-  scale_colour_manual(values = c("#ffb3f2", "#cea30d", "#003a9e")) +
-
+                                fill = family),
+                            shape = 22,
+                            colour = "#666666",
+                            method = "square",
+                            cex = 1.66,
+                            side = 1L,
+                            size = 1.7) +
+  scale_fill_manual(values = c("#ffb3f2", "#cea30d", "#44bebe")) +
   xlab("") +
-  ylab("Observed relative abundance (%)\nof the expected family") +
+  ylab("Observed relative abundance (%)\nof the expected (SRA) family") +
   ylim(c(0, 100)) +
-  scale_y_continuous(breaks = c(0,5,25,50,75,95,100)) +
+  scale_y_continuous(breaks = c(0, 5, 80, 95, 100),
+                     minor_breaks = seq(0, 100, 10)) +
   theme_minimal() +
-  theme(legend.position = "none",
-        axis.text = element_text(size = 10),
-        axis.title = element_text(size = 12)) +
+  theme(axis.text = element_text(size = 8,
+                                 family = "Arial")) +
   annotate("rect", fill = "#64ab05",
-           xmin = 0.4, xmax = 0.5,
+           xmin = 0.6, xmax = 0.8,
            ymin = 95, ymax = 100) +
   annotate("rect", fill = "#f3d819",
-           xmin = 0.4, xmax = 0.5,
+           xmin = 0.6, xmax = 0.8,
            ymin = 80, ymax = 95) +
   annotate("rect", fill = "#c86c44",
-           xmin = 0.4, xmax = 0.5,
+           xmin = 0.6, xmax = 0.8,
            ymin = 5, ymax = 80) +
   annotate("rect", fill = "#9c2a17",
-           xmin = 0.4, xmax = 0.5,
-           ymin = 0, ymax = 5)
+           xmin = 0.6, xmax = 0.8,
+           ymin = 0, ymax = 5) +
+  geom_segment(x = 1.75, xend = 1.95,
+               y = 94.7, yend = 99.2,
+               arrow = arrow(length = unit(.2,"cm"),
+                             type = "closed"),
+               colour = "black",
+               linewidth = 1.3) +
+  annotate("text",
+            x = 1.5, y = 92,
+           label = "SRR1522630",
+           colour = "black",
+           size = 3.25,
+           fontface = 2,
+           family = "Arial") +
+  geom_segment(x = 1.75, xend = 1.95,
+               y = 10, yend = 5.5,
+               arrow = arrow(length = unit(.2,"cm"),
+                             type = "closed"),
+               colour = "black",
+               linewidth = 1.3) +
+  annotate("text",
+           x = 1.5, y = 12.5,
+           label = "ERR212931",
+           colour = "black",
+           size = 3.25,
+           fontface = 2,
+           family = "Arial")
+
+violin_plot <- violin_plot +
+  coord_cartesian(xlim = c(1.2,3.2)) +
+  theme(text = element_text(family = "Arial"),
+        legend.text = element_text(family = "Arial"),
+        legend.title = element_blank(),
+        legend.position = "inside",
+        legend.position.inside = c(0.85, 0.275))
+
+# No legend option
+violin_plot <- violin_plot + theme(legend.position = "none")
+
+
+png(filename = paste0(main_dir, "Percentage_matching_abundance.png"),
+    width = 2600, height = 2600, res = 600,
+    pointsize = 2)
 violin_plot
+dev.off()
 
 ## metaphlan UpSet ----
+
+phylum_UpSet_metadata <- data.frame(
+  family_and_phylum[, c("set","phylum")]
+)
+
+
 upset_plot <- ComplexUpset::upset(
   ### Basic input & parameters ----
   data = threshold_family,
   intersect = family_and_phylum$set,
   height_ratio = 0.8,
   # name refers to the main x label (below the intersection grid) 
-  name = "",
+  name = "Observed family intersections (bottom), and their sample counts (top)",
   # Removing empty intersections
   min_degree = 1,
+  
   sort_sets = FALSE,
   sort_intersections_by = c('cardinality', 'degree', 'ratio'),
+  
+  stripes = upset_stripes(mapping = aes(color=phylum),
+                          colors = c("Proteobacteria"="#eeeeeeee",
+                                     "Firmicutes"="#ccccccee",
+                                     "Actinobacteria"="#aaaaaaee",
+                                     "Bacteroidota"="#888888ee"),
+                          data = phylum_UpSet_metadata),
   
   ### Intersections ----
   base_annotations = list(
@@ -240,58 +309,165 @@ upset_plot <- ComplexUpset::upset(
         label = !!get_size_mode("exclusive_intersection"),
         # Shenanigan to place label on top of bar, there must exist a better way.
         y = ifelse(!!get_size_mode("exclusive_intersection"),
-                   !!get_size_mode("exclusive_intersection") + .5,
+                   !!get_size_mode("exclusive_intersection") + .3,
                    0)),
       text_colors = c(on_background = "black",
                       on_bar = "black"),
-      text = list(size = 5),
+      text = list(size = 4),
       mapping = aes(fill = SRA_Agreement)) +
       scale_fill_manual(values = c("95-100%"="#64ab05",
                                    "80-95%"="#f3d819",
                                    "5-80%"="#c86c44",
-                                   "0-5%"="#9c2a17")) +
+                                   "Mismatch"="#9c2a17")) +
       ylab("") +
       theme(axis.title =
               element_text(size = 14,
                            face = "bold",
-                           hjust = 1),
-            legend.position = "none")
-  ),
+                           hjust = 1,
+                           family = "Arial")) +
+      annotate("text",
+               x = 6.35,
+               y = 22,
+               size = 5,
+               label = "SRR1522630",
+               colour = "black",
+               fontface = 2,
+               family = "Arial") +
+      geom_segment(x = 4.72, xend = 4.72,
+                 y = 21, yend = 14,
+                 colour = "black",
+                 arrow = arrow(length = unit(.2,"cm"),
+                               type = "closed"),
+                 linewidth = 1) +
+      annotate("text",
+               x = 10.2,
+               y = 12,
+               size = 5,
+               label = "ERR212931",
+               colour = "black",
+               fontface = 2,
+               family = "Arial") +
+      geom_segment(x = 8.72, xend = 8.72,
+                   y = 11, yend = 4,
+                   colour = "black",
+                   arrow = arrow(length = unit(.2,"cm"),
+                                 type = "closed"),
+                   linewidth = 1)
+),
   
   ### Graphical adjustments ----
-  set_sizes = (
-    upset_set_size(
-      geom = geom_bar(
-        mapping = aes(fill = family),
-        width = 0.8))) +
-    ylim(c(0,120)) +
-    scale_fill_manual(values= c("Staphylococcaceae"="#cea30d",
-                                "Enterobacteriaceae"="#ffb3f2",
-                                "Streptococcaceae"="#003a9e")) +
-  # mapping = aes(y = after_stat(count)))) +
-    ylab(paste0("Count of samples with > ",
-                cont_threshold, "%\nobserved abundance of bacterial family")) +
-    theme(axis.ticks.x = element_line(),
-          axis.title = element_text(size = 11),
-          legend.position = "none" ),
-  
+  set_sizes=FALSE,
   themes = upset_modify_themes(to_update = list(
     "intersections_matrix" = theme(text = element_text(size = 15)))
   )
 )
-upset_plot
+upset_plot <- upset_plot + theme(text = element_text(family = "Arial"))
 
-# Saving plots ----
-png(filename = paste0(main_dir, "/paper/Distribution_observed_abundance_v3.png"),
-    width = 1600, height = 1200, res = 300,
-    pointsize = 2)
-violin_plot
-dev.off()
 
-png(filename = paste0(main_dir, "/paper/UpSet_plot_v3.png"),
-    width = 3400, height = 2400, res = 300)
+png(filename = paste0(main_dir, "UpSet_plot.png"),
+    width = 6800, height = 4000, res = 600)
 upset_plot
 dev.off()
+
+upset_plot <- ComplexUpset::upset(
+  ### Basic input & parameters ----
+  data = threshold_family,
+  intersect = family_and_phylum$set,
+  height_ratio = 0.8,
+  # name refers to the main x label (below the intersection grid) 
+  name = "Observed family intersections (bottom), and their sample counts (top)",
+  # Removing empty intersections
+  min_degree = 1,
+  
+  sort_sets = FALSE,
+  sort_intersections_by = c('cardinality', 'degree', 'ratio'),
+  
+  stripes = upset_stripes(mapping = aes(color=phylum),
+                          colors = c("Proteobacteria"="#eeeeeeee",
+                                     "Firmicutes"="#ccccccee",
+                                     "Actinobacteria"="#aaaaaaee",
+                                     "Bacteroidota"="#888888ee"),
+                          data = phylum_UpSet_metadata),
+  
+  ### Intersections ----
+  base_annotations = list(
+    "Intersection size" = intersection_size(
+      text_mapping = aes(
+        label = !!get_size_mode("exclusive_intersection"),
+        # Shenanigan to place label on top of bar, there must exist a better way.
+        y = ifelse(!!get_size_mode("exclusive_intersection"),
+                   !!get_size_mode("exclusive_intersection") + .3,
+                   0)),
+      text_colors = c(on_background = "black",
+                      on_bar = "black"),
+      text = list(size = 4),
+      mapping = aes(fill = family)) +
+      scale_fill_manual(values = c("Enterobacteriaceae"="#ffb3f2",
+                                   "Staphylococcaceae"="#cea30d",
+                                   "Streptococcaceae"="#44bebe")) +
+      ylab("") +
+      theme(axis.title =
+              element_text(size = 14,
+                           face = "bold",
+                           hjust = 1,
+                           family = "Arial")) +
+      annotate("text",
+               x = 6.35,
+               y = 22,
+               size = 5,
+               label = "SRR1522630",
+               colour = "black",
+               fontface = 2,
+               family = "Arial") +
+      geom_segment(x = 4.72, xend = 4.72,
+                   y = 21, yend = 8,
+                   colour = "black",
+                   arrow = arrow(length = unit(.2,"cm"),
+                                 type = "closed"),
+                   linewidth = 1) +
+      annotate("text",
+               x = 10.2,
+               y = 12,
+               size = 5,
+               label = "ERR212931",
+               colour = "black",
+               fontface = 2,
+               family = "Arial") +
+      geom_segment(x = 8.72, xend = 8.72,
+                   y = 11, yend = 4,
+                   colour = "black",
+                   arrow = arrow(length = unit(.2,"cm"),
+                                 type = "closed"),
+                   linewidth = 1)
+  ),
+  
+  ### Graphical adjustments ----
+  set_sizes=FALSE,
+  themes = upset_modify_themes(to_update = list(
+    "intersections_matrix" = theme(text = element_text(size = 15)))
+  )
+)
+upset_plot <- upset_plot + theme(text = element_text(family = "Arial"))
+
+upset_plot
+
+png(filename = paste0(main_dir, "UpSet_plot_alt.png"),
+    width = 6800, height = 4000, res = 600)
+upset_plot
+dev.off()
+
+# Saving tables
+write_tsv(threshold_family,
+          paste0(main_dir,
+                 "Threshold_family.tsv"))
+
+write_tsv(violin_df,
+          paste0(main_dir,
+                 "Abundance_phylum_family.tsv"))
+
+write_tsv(metaphlan_sra_ref,
+          paste0(main_dir,
+                 "Distribution_table.tsv"))
 
 # Legend info for Staph. examples ----
 # Examples of expected Staphylococcaceae with problematic contamination
@@ -311,7 +487,10 @@ Staph_examples_df$clade_name <-
   str_replace_all(string = Staph_examples_df$clade_name,
                   pattern = ".*s__",
                   replacement = "")
-View(Staph_examples_df[order(Staph_examples_df$clade_name), ])
+# View(Staph_examples_df[order(Staph_examples_df$clade_name), ])
 
 # sessionInfo() ----
-sessionInfo()
+writeLines(capture.output(sessionInfo()),
+                          paste0(main_dir,
+                                 "plots_family_RsessionInfo.txt"))
+

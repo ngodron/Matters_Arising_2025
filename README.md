@@ -24,3 +24,19 @@ LEADING:20 TRAILING:20 SLIDINGWINDOW:15:20
 
 ### Analysis
 - Script: plot_assembled_contigs.R
+
+## Supplementary_data
+- All_run_info.tsv:
+
+- Distribution_table.tsv:
+
+- SRAARGMapping.tab:
+
+- SRAlist.txt:
+
+- Suppl_Table_1.txt:
+
+- Threshold_family.tsv:
+
+- plots_family_RsessionInfo.txt:
+

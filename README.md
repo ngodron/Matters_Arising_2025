@@ -26,17 +26,21 @@ LEADING:20 TRAILING:20 SLIDINGWINDOW:15:20
 - Script: plot_assembled_contigs.R
 
 ## Supplementary_data
-- All_run_info.tsv:
+### Common to both pipelines (metadata & download)
 
-- Distribution_table.tsv:
+- SRAARGMapping.tab
 
-- SRAARGMapping.tab:
+- SRAlist.txt
 
-- SRAlist.txt:
+### Assembly_pipeline
+- Suppl_Table_1.txt
 
-- Suppl_Table_1.txt:
 
-- Threshold_family.tsv:
+### Reads_pipeline
+- All_run_info.tsv
 
-- plots_family_RsessionInfo.txt:
+- Distribution_table.tsv
 
+- Threshold_family.tsv
+
+- plots_family_RsessionInfo.txt

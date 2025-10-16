@@ -49,3 +49,16 @@ Presence/absence matrix at the family level (threshold for presence: > 5% abunda
 
 - plots_family_RsessionInfo.txt
 Info about the version of R (4.3.3) packages for reproducibility purposes.
+
+
+## Added during reviewing process
+
+In Figures_and_Review_Figures folder:
+- Figure 1 (last version, including E panel)
+- GUNC and MetaPhLan ECDFs plot
+- MetaPhLan density plot
+
+In Assembly_pipeline folder:
+- barplotCoverage_IS.R
+- compute_sequencing_depth_refGenomes.sh
+- sam2bam.sh
